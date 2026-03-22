@@ -22,6 +22,15 @@ def header(title: str) -> None:
     line = "=" * len(title)
     print(f"\n{title}\n{line}")
 
+def print_tree(root: Path, prefix="") -> None:
+    entries = sorted([p for p in root.iterdir() if p.name not in EXCLUDE_FILES])
+    for i, path in enumerate(entries):
+        connector = "└── " if i == len(entries) - 1 else "├── "
+        print(f"{prefix}{connector}{path.name}")
+        if path.is_dir():
+            extension = "    " if i == len(entries) - 1 else "│   "
+            print_tree(path, prefix + extension)
+
 # ============================================================
 # BASELINE HANDLING
 # ============================================================
@@ -50,18 +59,8 @@ def append_change_log(path: Path, added: set[str], removed: set[str]) -> None:
     with path.open("a", encoding="utf-8") as log:
         log.write("\n")
         log.write(f"[RUN {timestamp()}]\n")
-        if added:
-            log.write("ADDED:\n")
-            for item in sorted(added):
-                log.write(f"+ {item}\n")
-        else:
-            log.write("ADDED: (none)\n")
-        if removed:
-            log.write("REMOVED:\n")
-            for item in sorted(removed):
-                log.write(f"- {item}\n")
-        else:
-            log.write("REMOVED: (none)\n")
+        log.write("ADDED:\n" + ("\n".join(f"+ {a}" for a in sorted(added)) if added else "(none)") + "\n")
+        log.write("REMOVED:\n" + ("\n".join(f"- {r}" for r in sorted(removed)) if removed else "(none)") + "\n")
 
 # ============================================================
 # SCANNING
@@ -95,8 +94,6 @@ class DeltaScanner:
         self.render_results(added, removed, current)
         append_change_log(self.change_log_path, added, removed)
         save_baseline(self.baseline_path, current)
-
-        # Final summary report
         self.print_summary(added, removed, current)
 
         input("\nPress ENTER to exit and review logs...")
@@ -109,10 +106,12 @@ class DeltaScanner:
         header("REMOVED FILES")
         print("\n".join(sorted(removed)) if removed else "(none)")
 
-        header("SEEN FILES")
-        for path in sorted(seen):
-            if path not in added and path not in removed:
-                print(f"* {path}")
+        header("FULL DIRECTORY TREE")
+        try:
+            root_path = Path(__file__).resolve().parent
+        except NameError:
+            root_path = Path.cwd()
+        print_tree(root_path)
 
     @staticmethod
     def print_summary(added: set[str], removed: set[str], seen: set[str]) -> None:
