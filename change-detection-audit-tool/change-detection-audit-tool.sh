@@ -1,130 +1,144 @@
-#!/usr/bin/env bash
-# =============================================================
-# TREE CHRONICLE v2 – TreeMapper Next-Gen
-# Platform: Git Bash / Windows
-# Mode: Passive | Append-Only | Human-Readable | Ledger Tracking
-# =============================================================
+#!/usr/bin/env python3
+import os
+from datetime import datetime
+from pathlib import Path
 
-# ---------------------- IMMUTABLE PATHS ----------------------
-ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_DIR="$ROOT_DIR/logs"
-LEDGER="$LOG_DIR/tree_ledger.csv"
+# ============================================================
+# CONFIG
+# ============================================================
 
-mkdir -p "$LOG_DIR"
+BASELINE_FILENAME = "file_delta_baseline.log"
+CHANGELOG_FILENAME = "file_delta_change.log"
+EXCLUDE_FILES = {BASELINE_FILENAME, CHANGELOG_FILENAME}
 
-# ---------------------- COLOR DEFINITIONS --------------------
-RED="\033[0;31m"
-GREEN="\033[0;32m"
-YELLOW="\033[0;33m"
-CYAN="\033[0;36m"
-MAGENTA="\033[0;35m"
-NC="\033[0m"
+# ============================================================
+# UTILITIES
+# ============================================================
 
-# ---------------------- SESSION HEADER -----------------------
-SESSION_TS="$(date '+%Y-%m-%d %H:%M:%S')"
-echo -e "${CYAN}==================================================${NC}"
-echo -e "${CYAN}TREE CHRONICLE v2 START : $SESSION_TS${NC}"
-echo -e "${CYAN}ROOT FOLDER : $ROOT_DIR${NC}"
-echo -e "${CYAN}==================================================${NC}"
+def timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ---------------------- INITIALIZE LEDGER --------------------
-if [ ! -f "$LEDGER" ]; then
-    echo "timestamp|path|type|status|depth" > "$LEDGER"
-fi
+def header(title: str) -> None:
+    line = "=" * len(title)
+    print(f"\n{title}\n{line}")
 
-# ---------------------- HELPER FUNCTIONS ---------------------
+def print_tree(root: Path, prefix="") -> None:
+    entries = sorted([p for p in root.iterdir() if p.name not in EXCLUDE_FILES])
+    for i, path in enumerate(entries):
+        connector = "└── " if i == len(entries) - 1 else "├── "
+        print(f"{prefix}{connector}{path.name}")
+        if path.is_dir():
+            extension = "    " if i == len(entries) - 1 else "│   "
+            print_tree(path, prefix + extension)
 
-# Get timestamp
-ts() { date '+%Y-%m-%d %H:%M:%S'; }
+# ============================================================
+# BASELINE HANDLING
+# ============================================================
 
-# Print alert with color
-alert() {
-    local status=$1
-    local name=$2
-    case "$status" in
-        NEW) echo -e "${GREEN}[NEW]      $name${NC}" ;;
-        RESEEN) echo -e "${YELLOW}[RESEEN]   $name${NC}" ;;
-        REMOVED) echo -e "${RED}[REMOVED]  $name${NC}" ;;
-    esac
-}
+def load_baseline(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    entries = set()
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if line and line not in EXCLUDE_FILES:
+                entries.add(line)
+    return entries
 
-# Compute depth for tree display
-depth() {
-    local path="$1"
-    echo "$path" | awk -F"/" '{print NF}'
-}
+def save_baseline(path: Path, files: set[str]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for file in sorted(files):
+            f.write(file + "\n")
 
-# ---------------------- LOAD PREVIOUS SNAPSHOT -----------------
-declare -A LEDGER_MAP
-while IFS='|' read -r timestamp path type status depth; do
-    [ "$path" == "path" ] && continue
-    LEDGER_MAP["$path"]="$type|$status|$timestamp|$depth"
-done < "$LEDGER"
+# ============================================================
+# CHANGE LOGGING
+# ============================================================
 
-# ---------------------- SCAN CURRENT FOLDER -------------------
-SCAN_TS="$(ts)"
-CURRENT_MAP=()
-FILES=$(find . -type d -o -type f | sed 's|^\./||')
+def append_change_log(path: Path, added: set[str], removed: set[str]) -> None:
+    with path.open("a", encoding="utf-8") as log:
+        log.write("\n")
+        log.write(f"[RUN {timestamp()}]\n")
+        log.write("ADDED:\n" + ("\n".join(f"+ {a}" for a in sorted(added)) if added else "(none)") + "\n")
+        log.write("REMOVED:\n" + ("\n".join(f"- {r}" for r in sorted(removed)) if removed else "(none)") + "\n")
 
-for item in $FILES; do
-    CURRENT_MAP+=("$item")
-done
+# ============================================================
+# SCANNING
+# ============================================================
 
-# ---------------------- DETECT CHANGES ------------------------
-declare -A CURRENT_STATUS
+def scan_files(root: Path) -> set[str]:
+    results = set()
+    for dirpath, _, filenames in os.walk(root):
+        for name in filenames:
+            if name not in EXCLUDE_FILES:
+                results.add(os.path.join(dirpath, name))
+    return results
 
-for path in "${CURRENT_MAP[@]}"; do
-    type="FILE"
-    [ -d "$path" ] && type="DIR"
-    d=$(depth "$path")
-    if [ -z "${LEDGER_MAP[$path]}" ]; then
-        # NEW
-        CURRENT_STATUS["$path"]="NEW"
-        alert NEW "$path"
-        echo "$SCAN_TS|$path|$type|NEW|$d" >> "$LEDGER"
-    else
-        # RESEEN
-        CURRENT_STATUS["$path"]="RESEEN"
-        alert RESEEN "$path"
-        echo "$SCAN_TS|$path|$type|RESEEN|$d" >> "$LEDGER"
-    fi
-done
+# ============================================================
+# DELTA ENGINE
+# ============================================================
 
-# Detect REMOVED files/folders
-for path in "${!LEDGER_MAP[@]}"; do
-    if [[ ! " ${CURRENT_MAP[*]} " =~ " $path " ]]; then
-        type=$(echo "${LEDGER_MAP[$path]}" | cut -d'|' -f1)
-        d=$(echo "${LEDGER_MAP[$path]}" | cut -d'|' -f4)
-        alert REMOVED "$path"
-        echo "$SCAN_TS|$path|$type|REMOVED|$d" >> "$LEDGER"
-    fi
-done
+class DeltaScanner:
+    def __init__(self, root: Path):
+        self.root = root
+        self.baseline_path = root / BASELINE_FILENAME
+        self.change_log_path = root / CHANGELOG_FILENAME
 
-# ---------------------- TREE DISPLAY --------------------------
-for path in "${CURRENT_MAP[@]}"; do
-    type="FILE"
-    [ -d "$path" ] && type="DIR"
-    d=$(depth "$path")
-    prefix=""
-    for ((i=1;i<d;i++)); do
-        prefix+="│   "
-    done
-    [ $d -gt 1 ] && prefix+="├── "
-    color=$NC
-    [[ "${CURRENT_STATUS[$path]}" == "NEW" ]] && color=$GREEN
-    [[ "${CURRENT_STATUS[$path]}" == "RESEEN" ]] && color=$YELLOW
-    echo -e "${color}${prefix}${path}${NC}"
-done
+    def run(self) -> None:
+        previous = load_baseline(self.baseline_path)
+        current = scan_files(self.root)
 
-# ---------------------- DERIVED SUMMARY -----------------------
-TOTAL_FILES=$(find . -type f | wc -l)
-TOTAL_DIRS=$(find . -type d | wc -l)
-MAX_DEPTH=$(awk -F"/" '{print NF}' <<< "$FILES" | sort -nr | head -1)
+        added = current - previous
+        removed = previous - current
 
-echo -e "${CYAN}--------------------------------------------------${NC}"
-echo -e "${CYAN}Scan Summary:${NC} TOTAL_DIRS=$TOTAL_DIRS, TOTAL_FILES=$TOTAL_FILES, MAX_DEPTH=$MAX_DEPTH"
-echo -e "${CYAN}--------------------------------------------------${NC}"
+        self.render_results(added, removed, current)
+        append_change_log(self.change_log_path, added, removed)
+        save_baseline(self.baseline_path, current)
+        self.print_summary(added, removed, current)
 
-# ---------------------- END OF SCRIPT -------------------------
-echo
-read -p "Press [ENTER] to exit..."
+        input("\nPress ENTER to exit and review logs...")
+
+    @staticmethod
+    def render_results(added: set[str], removed: set[str], seen: set[str]) -> None:
+        header("ADDED FILES")
+        print("\n".join(sorted(added)) if added else "(none)")
+
+        header("REMOVED FILES")
+        print("\n".join(sorted(removed)) if removed else "(none)")
+
+        header("FULL DIRECTORY TREE")
+        try:
+            root_path = Path(__file__).resolve().parent
+        except NameError:
+            root_path = Path.cwd()
+        print_tree(root_path)
+
+    @staticmethod
+    def print_summary(added: set[str], removed: set[str], seen: set[str]) -> None:
+        header("SCAN SUMMARY")
+        print(f"Timestamp : {timestamp()}")
+        print(f"Root Path : {Path.cwd()}")
+        print(f"Added     : {len(added)} file(s)")
+        print(f"Removed   : {len(removed)} file(s)")
+        print(f"Seen      : {len(seen) - len(added) - len(removed)} file(s)")
+        print("=" * 30)
+        print(f"Baseline saved at : {Path.cwd() / BASELINE_FILENAME}")
+        print(f"Changes logged at : {Path.cwd() / CHANGELOG_FILENAME}")
+        print("=" * 30)
+        print("Scan complete. Review results above.")
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    try:
+        root = Path(__file__).resolve().parent
+    except NameError:
+        root = Path.cwd()
+
+    scanner = DeltaScanner(root)
+    scanner.run()
+
+if __name__ == "__main__":
+    main()
